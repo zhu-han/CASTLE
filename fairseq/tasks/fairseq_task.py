@@ -223,6 +223,7 @@ class FairseqTask(object):
         epoch=1,
         data_buffer_size=0,
         disable_iterator_cache=False,
+        is_train=True,
     ):
         """
         Get an iterator that yields batches of data from the given dataset.

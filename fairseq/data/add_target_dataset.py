@@ -4,6 +4,7 @@
 # LICENSE file in the root directory of this source tree.
 
 import torch
+import numpy as np
 
 from . import BaseWrapperDataset, data_utils
 
@@ -26,6 +27,7 @@ class AddTargetDataset(BaseWrapperDataset):
         self.eos = eos
         self.process_label = process_label
         self.add_to_input = add_to_input
+        self.line_inds = self.dataset.line_inds
 
     def get_label(self, index):
         return (
@@ -68,3 +70,56 @@ class AddTargetDataset(BaseWrapperDataset):
             ).long()
             collated["ntokens"] += target.size(0)
         return collated
+
+class AddAuxTargetDataset(BaseWrapperDataset):
+    def __init__(
+        self,
+        dataset,
+        aux_labels,
+        batch_targets,
+        add_to_input=False,
+    ):
+        super().__init__(dataset)
+        self.aux_labels = aux_labels
+        self.batch_targets = batch_targets
+
+    def __getitem__(self, index):
+        item = self.dataset[index]
+        item["aux_label"] = self.aux_labels[index]
+        return item
+
+    def size(self, index):
+        sz = self.dataset.size(index)
+        return sz
+
+    def collater(self, samples):
+        collated = self.dataset.collater(samples)
+        if len(collated) == 0:
+            return collated
+        indices = set(collated["id"].tolist())
+        target = [s["aux_label"] for s in samples if s["id"] in indices]
+
+        if self.batch_targets:
+            target = torch.tensor(target)
+
+        collated["aux_target"] = target
+
+        return collated
+
+    def ordered_indices(self):
+        """Return an list of ordered lists of indices. Each ordered lists has same aux_labels value. Batches will be constructed based
+        on this order."""
+
+        orderd_indices = self.dataset.ordered_indices()
+
+        orderd_aux_labels = np.array(self.aux_labels)[orderd_indices]
+
+        aux_labels_set = set(orderd_aux_labels)
+
+        group_bool_indices = [[aux_label == i for aux_label in orderd_aux_labels] for i in aux_labels_set]
+    
+        group_orderd_indices = [
+            [indices_value for indices_value, bool_value in zip(orderd_indices, bool_indices) if bool_value] 
+            for bool_indices in group_bool_indices]
+
+        return group_orderd_indices

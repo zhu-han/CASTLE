@@ -198,6 +198,8 @@ class CtcCriterion(FairseqCriterion):
 
                     if decoded is not None and "words" in decoded:
                         pred_words = decoded["words"]
+                        if self.post_process == "char":
+                            pred_words = list("".join(pred_words))
                         w_errs += editdistance.eval(pred_words, targ_words)
                         wv_errs += editdistance.eval(pred_words_raw, targ_words)
                     else:

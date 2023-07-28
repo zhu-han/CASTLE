@@ -10,7 +10,7 @@ from .fairseq_dataset import FairseqDataset, FairseqIterableDataset
 
 from .base_wrapper_dataset import BaseWrapperDataset
 
-from .add_target_dataset import AddTargetDataset
+from .add_target_dataset import AddTargetDataset, AddAuxTargetDataset
 from .append_token_dataset import AppendTokenDataset
 from .audio.raw_audio_dataset import FileAudioDataset
 from .backtranslation_dataset import BacktranslationDataset
@@ -66,6 +66,7 @@ from .iterators import (
 
 __all__ = [
     "AddTargetDataset",
+    "AddAuxTargetDataset",
     "AppendTokenDataset",
     "BacktranslationDataset",
     "BaseWrapperDataset",

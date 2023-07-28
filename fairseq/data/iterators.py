@@ -502,6 +502,197 @@ class EpochBatchIterator(EpochBatchIterating):
         return itr
 
 
+class EpochGroupBatchIterator(EpochBatchIterator):
+    """A multi-epoch group iterator over a :class:`EpochBatchIterator`.
+
+    Compared to :class:`EpochBatchIterator`, this iterator:
+
+    - only accept list of iterators as batch_sampler, named as group_batch_sampler
+    - seperate sampler for source and target domains
+
+    Args:
+        dataset (~torch.utils.data.Dataset): dataset from which to load the data
+        collate_fn (callable): merges a list of samples to form a mini-batch
+        group_batch_sampler (tuple): group_batch_sampleris a list of iterators over batches of
+            indices.
+            A callable batch_sampler will be called for each epoch to enable per epoch dynamic
+            batch iterators defined by this callable batch_sampler.
+        seed (int, optional): seed for random number generator for
+            reproducibility (default: 1).
+        num_shards (int, optional): shard the data iterator into N
+            shards (default: 1).
+        shard_id (int, optional): which shard of the data iterator to
+            return (default: 0).
+        num_workers (int, optional): how many subprocesses to use for data
+            loading. 0 means the data will be loaded in the main process
+            (default: 0).
+        epoch (int, optional): the epoch to start the iterator from
+            (default: 1).
+        buffer_size (int, optional): the number of batches to keep ready in the
+            queue. Helps speeding up dataloading. When buffer_size is zero, the
+            default torch.utils.data.DataLoader preloading is used.
+        timeout (int, optional): if positive, the timeout value for collecting a batch
+            from workers. Should always be non-negative (default: ``0``).
+        disable_shuffling (bool, optional): force disable shuffling
+            (default: ``False``).
+        is_train (bool, optional): training or not (validation).
+    """
+
+    def __init__(
+        self,
+        dataset,
+        collate_fn,
+        group_batch_sampler,
+        seed=1,
+        num_shards=1,
+        shard_id=0,
+        num_workers=0,
+        epoch=1,
+        buffer_size=0,
+        timeout=0,
+        disable_shuffling=False,
+        is_train=True,
+        resampling_target=True,
+    ):
+        super().__init__(
+            dataset,
+            collate_fn,
+            group_batch_sampler,
+            seed=seed,
+            num_shards=num_shards,
+            shard_id=shard_id,
+            num_workers=num_workers,
+            epoch=epoch,
+            buffer_size=buffer_size,
+            timeout=timeout,
+            disable_shuffling=disable_shuffling)
+        
+        assert len(group_batch_sampler) == 2
+        self.group_batch_sampler = group_batch_sampler
+        
+        for batch_sampler in group_batch_sampler:
+            assert not callable(batch_sampler)
+        self._frozen_batches = [
+            tuple(batch_sampler) for batch_sampler in self.group_batch_sampler
+        ]
+        self._resampling_frozen_batches = None
+
+        if resampling_target:
+            self.random_resampling_batches(self._frozen_batches[0], self._frozen_batches[1], self.seed)
+        else:
+            self.random_resampling_batches(self._frozen_batches[1], self._frozen_batches[0], self.seed)
+
+        self.is_train = is_train
+        self.resampling_target = resampling_target
+
+    def random_resampling_batches(self, reference_batches, resampled_batches, seed):
+        with data_utils.numpy_seed(seed):
+            batches_weight_list = np.random.multinomial(len(reference_batches), [1 / len(resampled_batches)] * len(resampled_batches)) 
+            resampling_batches = []
+            for unweighted_batch, batch_weight in zip(resampled_batches, batches_weight_list):
+                for _ in range(batch_weight):
+                    resampling_batches.append(unweighted_batch)
+            # np.random.shuffle(resampling_batches)
+
+        self._resampling_frozen_batches = []
+        start_index = 0
+        for reference_batch, resampling_batch in zip(reference_batches, resampling_batches):
+            self._resampling_frozen_batches.append(np.append(reference_batch, resampling_batch))
+
+    @property
+    def frozen_batches(self):        
+        return self._resampling_frozen_batches
+
+    def next_epoch_itr(
+        self, shuffle=True, fix_batches_to_gpus=False, set_dataset_epoch=True
+    ):
+        """Return a new iterator over the dataset.
+
+        Args:
+            shuffle (bool, optional): shuffle batches before returning the
+                iterator (default: True).
+            fix_batches_to_gpus (bool, optional): ensure that batches are always
+                allocated to the same shards across epochs. Requires
+                that :attr:`dataset` supports prefetching (default: False).
+            set_dataset_epoch (bool, optional): update the wrapped Dataset with
+                the new epoch number (default: True).
+        """
+        if self.disable_shuffling:
+            shuffle = False
+        self.epoch = self.next_epoch_idx
+        if set_dataset_epoch and hasattr(self.dataset, "set_epoch"):
+            self.dataset.set_epoch(self.epoch)
+        if self._next_epoch_itr is not None:
+            self._cur_epoch_itr = self._next_epoch_itr
+            self._next_epoch_itr = None
+        else:
+            self._cur_epoch_itr = self._get_iterator_for_epoch(
+                self.epoch,
+                shuffle,
+                fix_batches_to_gpus=fix_batches_to_gpus,
+            )
+        self.shuffle = shuffle
+        return self._cur_epoch_itr
+
+    def _get_iterator_for_epoch(
+        self, epoch, shuffle, fix_batches_to_gpus=False, offset=0
+    ):
+
+        def shuffle_batches(batches, seed):
+            with data_utils.numpy_seed(seed):
+                np.random.shuffle(batches)
+            return batches
+        if self.is_train and self.resampling_target:
+            self.random_resampling_batches(self._frozen_batches[0], self._frozen_batches[1], self.seed + epoch)
+        else:
+            self.random_resampling_batches(self._frozen_batches[1], self._frozen_batches[0], self.seed + epoch)
+
+        if self._supports_prefetch:
+            batches = self.frozen_batches
+
+            if shuffle and not fix_batches_to_gpus:
+                batches = shuffle_batches(list(batches), self.seed + epoch)
+
+            batches = list(
+                ShardedIterator(batches, self.num_shards, self.shard_id, fill_value=[])
+            )
+            self.dataset.prefetch([i for s in batches for i in s])
+
+            if shuffle and fix_batches_to_gpus:
+                batches = shuffle_batches(batches, self.seed + epoch + self.shard_id)
+        else:
+            if shuffle:
+                batches = shuffle_batches(list(self.frozen_batches), self.seed + epoch)
+            else:
+                batches = self.frozen_batches
+            batches = list(
+                ShardedIterator(batches, self.num_shards, self.shard_id, fill_value=[])
+            )
+
+        if offset > 0 and offset >= len(batches):
+            return None
+
+        if self.num_workers > 0:
+            os.environ["PYTHONWARNINGS"] = "ignore:semaphore_tracker:UserWarning"
+
+        # Create data loader
+        itr = torch.utils.data.DataLoader(
+            self.dataset,
+            collate_fn=self.collate_fn,
+            batch_sampler=batches[offset:],
+            num_workers=self.num_workers,
+            timeout=self.timeout,
+        )
+
+        # Wrap with a BufferedIterator if needed
+        if self.buffer_size > 0:
+            itr = BufferedIterator(self.buffer_size, itr)
+
+        # Wrap with CountingIterator
+        itr = CountingIterator(itr, start=offset)
+        return itr
+
+
 class GroupedIterator(CountingIterator):
     """Wrapper around an iterable that returns groups (chunks) of items.
 

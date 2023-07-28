@@ -148,6 +148,9 @@ class Wav2Vec2CtcConfig(Wav2Vec2AsrConfig):
     encoder_embed_dim: Optional[int] = field(
         default=768, metadata={"help": "encoder embedding dimension"}
     )
+    two_proj: bool = field(
+        default=False, metadata={"help": "whether to use two projection layer"}
+    )
 
 
 @register_model("wav2vec_ctc", dataclass=Wav2Vec2CtcConfig)
@@ -165,6 +168,9 @@ class Wav2VecCtc(BaseFairseqModel):
     def build_model(cls, cfg: Wav2Vec2CtcConfig, task: FairseqTask):
         """Build a new model instance."""
         w2v_encoder = Wav2VecEncoder(cfg, task.target_dictionary)
+        if cfg.two_proj:
+            two_proj = Linear(cfg.encoder_embed_dim, len(task.target_dictionary))
+            w2v_encoder.add_module("two_proj", two_proj)
         return cls(cfg, w2v_encoder)
 
     def get_normalized_probs(self, net_output, log_probs):
@@ -189,6 +195,33 @@ class Wav2VecCtc(BaseFairseqModel):
     def forward(self, **kwargs):
         x = self.w2v_encoder(**kwargs)
         return x
+
+    def get_two_proj_normalized_probs(self, net_output, log_probs, dropout=True, detach=False):
+        """Get normalized probabilities (or log probs) from a net's output."""
+
+        encoder_feature = net_output["encoder_feature"].transpose(0,1)
+        if dropout:
+            encoder_feature = self.w2v_encoder.final_dropout(encoder_feature)
+        if detach:
+            encoder_feature = encoder_feature.detach()
+        logits = self.w2v_encoder.two_proj(encoder_feature)
+        if log_probs:
+            return utils.log_softmax(logits.float(), dim=-1)
+        else:
+            return utils.softmax(logits.float(), dim=-1)
+
+    def get_two_proj_logits(self, net_output, dropout=False):
+        encoder_feature = net_output["encoder_feature"].transpose(0,1)
+        if dropout:
+            encoder_feature = self.w2v_encoder.final_dropout(encoder_feature)
+        logits = self.w2v_encoder.two_proj(encoder_feature)
+        padding = net_output["padding_mask"]
+        if padding is not None and padding.any():
+            padding = padding.T
+            logits[padding][...,0] = 0
+            logits[padding][...,1:] = float('-inf')
+
+        return logits
 
 
 @dataclass
@@ -358,22 +391,35 @@ class Wav2VecEncoder(FairseqEncoder):
         super().set_num_updates(num_updates)
         self.num_updates = num_updates
 
-    def forward(self, source, padding_mask, tbc=True, **kwargs):
+    def forward(self, source, padding_mask, tbc=True, batch_mask=None, no_mask=False, addition_mask_prob=-1.0, addition_mask_channel_prob=-1.0, **kwargs):
+
+        if batch_mask is not None:
+            source = source[batch_mask]
+            padding_mask = padding_mask[batch_mask]
+
+        max_duration = (~padding_mask).sum(-1).max()
+        if max_duration != source.size(1):
+            source = source[:, :max_duration]
+            padding_mask = padding_mask[:, :max_duration]
 
         w2v_args = {
             "source": source,
             "padding_mask": padding_mask,
-            "mask": self.apply_mask and self.training,
+            "mask": self.apply_mask and self.training and not no_mask,
+            "addition_mask_prob": addition_mask_prob,
+            "addition_mask_channel_prob": addition_mask_channel_prob,
         }
 
         ft = self.freeze_finetune_updates <= self.num_updates
 
         with torch.no_grad() if not ft else contextlib.ExitStack():
-            x, padding_mask = self.w2v_model.extract_features(**w2v_args)
+            x, padding_mask, mask_indices = self.w2v_model.extract_features(**w2v_args)
 
             if tbc:
                 # B x T x C -> T x B x C
                 x = x.transpose(0, 1)
+
+        encoder_feature = x
 
         x = self.final_dropout(x)
 
@@ -381,9 +427,11 @@ class Wav2VecEncoder(FairseqEncoder):
             x = self.proj(x)
 
         return {
+            "encoder_feature": encoder_feature.transpose(0,1), # B x T x C
             "encoder_out": x,  # T x B x C
             "encoder_padding_mask": padding_mask.transpose(0, 1),  # T x B
             "padding_mask": padding_mask,
+            "mask_indices": mask_indices, # B x T
         }
 
     def reorder_encoder_out(self, encoder_out, new_order):

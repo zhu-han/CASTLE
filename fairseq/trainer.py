@@ -566,6 +566,7 @@ class Trainer(object):
             epoch=epoch,
             data_buffer_size=self.cfg.dataset.data_buffer_size,
             disable_iterator_cache=disable_iterator_cache,
+            is_train=True,
         )
         self.reset_dummy_batch(batch_iterator.first_batch)
         return batch_iterator
@@ -595,6 +596,7 @@ class Trainer(object):
             epoch=1,
             data_buffer_size=self.cfg.dataset.data_buffer_size,
             disable_iterator_cache=disable_iterator_cache,
+            is_train=False,
         )
         self.reset_dummy_batch(batch_iterator.first_batch)
         return batch_iterator

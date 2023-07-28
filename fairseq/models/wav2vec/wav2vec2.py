@@ -332,10 +332,10 @@ class Wav2Vec2Model(BaseFairseqModel):
 
     def apply_mask(
         self, x, padding_mask,
-        mask_indices=None, mask_channel_indices=None,
+        mask_indices=None, mask_channel_indices=None, addition_mask_prob=-1.0, addition_mask_channel_prob=-1.0
     ):
         B, T, C = x.shape
-        if self.mask_prob > 0:
+        if self.mask_prob > 0 and addition_mask_prob < 0:
             if mask_indices is None:
                 mask_indices = compute_mask_indices(
                     (B, T),
@@ -350,15 +350,49 @@ class Wav2Vec2Model(BaseFairseqModel):
                 )
                 mask_indices = torch.from_numpy(mask_indices).to(x.device)
             x = index_put(x, mask_indices, self.mask_emb)
+        elif addition_mask_prob > 0:
+            if mask_indices is None:
+                mask_indices = compute_mask_indices(
+                    (B, T),
+                    padding_mask,
+                    addition_mask_prob,
+                    self.mask_length,
+                    self.mask_selection,
+                    self.mask_other,
+                    min_masks=2,
+                    no_overlap=self.no_mask_overlap,
+                    min_space=self.mask_min_space,
+                )
+                mask_indices = torch.from_numpy(mask_indices).to(x.device)
+            x = index_put(x, mask_indices, self.mask_emb)
         else:
             mask_indices = None
 
-        if self.mask_channel_prob > 0:
+        if self.mask_channel_prob > 0 and addition_mask_channel_prob < 0:
             if mask_channel_indices is None:
                 mask_channel_indices = compute_mask_indices(
                     (B, C),
                     None,
                     self.mask_channel_prob,
+                    self.mask_channel_length,
+                    self.mask_channel_selection,
+                    self.mask_channel_other,
+                    no_overlap=self.no_mask_channel_overlap,
+                    min_space=self.mask_channel_min_space,
+                )
+                mask_channel_indices = (
+                    torch.from_numpy(mask_channel_indices)
+                    .to(x.device)
+                    .unsqueeze(1)
+                    .expand(-1, T, -1)
+                )
+            x = index_put(x, mask_channel_indices, 0)
+        elif addition_mask_channel_prob > 0:
+            if mask_channel_indices is None:
+                mask_channel_indices = compute_mask_indices(
+                    (B, C),
+                    None,
+                    addition_mask_channel_prob,
                     self.mask_channel_length,
                     self.mask_channel_selection,
                     self.mask_channel_other,
@@ -474,7 +508,7 @@ class Wav2Vec2Model(BaseFairseqModel):
     def forward(
         self, source, padding_mask=None, mask=True, features_only=False,
         mask_indices=None, mask_channel_indices=None,
-        padding_count=None,
+        padding_count=None, addition_mask_prob=-1.0, addition_mask_channel_prob=-1.0
     ):
 
         if self.feature_grad_mult > 0:
@@ -530,6 +564,8 @@ class Wav2Vec2Model(BaseFairseqModel):
                 features, padding_mask,
                 mask_indices=mask_indices,
                 mask_channel_indices=mask_channel_indices,
+                addition_mask_prob=addition_mask_prob,
+                addition_mask_channel_prob=addition_mask_channel_prob,
             )
             if not is_xla_tensor(x) and mask_indices is not None:
                 # tpu-comment: reducing the size in a dynamic way causes
@@ -547,7 +583,7 @@ class Wav2Vec2Model(BaseFairseqModel):
         x = self.encoder(x, padding_mask=padding_mask)
 
         if features_only:
-            return {"x": x, "padding_mask": padding_mask}
+            return {"x": x, "padding_mask": padding_mask, "mask_indices": mask_indices}
 
         if self.quantizer:
             q = self.quantizer(y, produce_targets=False)
@@ -627,9 +663,9 @@ class Wav2Vec2Model(BaseFairseqModel):
         x = self.layer_norm(x)
         return self.quantizer.forward_idx(x)
 
-    def extract_features(self, source, padding_mask, mask=False):
-        res = self.forward(source, padding_mask, mask=mask, features_only=True)
-        return res["x"], res["padding_mask"]
+    def extract_features(self, source, padding_mask, mask=False, addition_mask_prob=-1.0, addition_mask_channel_prob=-1.0):
+        res = self.forward(source, padding_mask, mask=mask, features_only=True, addition_mask_prob=addition_mask_prob, addition_mask_channel_prob=addition_mask_channel_prob)
+        return res["x"], res["padding_mask"], res["mask_indices"]
 
     def get_logits(self, net_output):
         logits = net_output["x"]
