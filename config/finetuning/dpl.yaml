@@ -1,0 +1,80 @@
+# @package _group_
+
+hydra:
+  run:
+    dir: ???
+
+common:
+  fp16: true
+  log_format: json
+  log_interval: 200
+
+checkpoint:
+  no_epoch_checkpoints: true
+  best_checkpoint_metric: wer
+  # patience: 10
+
+task:
+  _name: uda_audio_pretraining
+  data: ???
+  normalize: false
+  labels: ltr
+  aux_labels: cls
+  max_sample_size: 480000
+  min_sample_size: 1600
+
+dataset:
+  num_workers: 6
+  max_tokens: 1600000
+  skip_invalid_size_inputs_valid_test: true
+  train_subset: train
+  valid_subset: dev
+
+distributed_training:
+  distributed_world_size: 8
+  ddp_backend: legacy_ddp
+
+criterion:
+  _name: ctc_dpl
+  zero_infinity: true
+  pl_weight: 1.0
+  pl_start_updates: -1
+  confidence_threshold: 0.8
+  ema_decay_factor: 0.0
+  ema_update: 1
+  addition_mask_channel_prob: 0.5
+  addition_mask_prob: -1
+  two_proj: true
+  two_proj_weight: 1.0
+
+optimization:
+  max_update: 20000
+  lr: [0.00003]
+  sentence_avg: true
+  update_freq: [2]
+
+optimizer:
+  _name: adam
+  adam_betas: (0.9,0.98)
+  adam_eps: 1e-08
+
+lr_scheduler:
+  _name: tri_stage
+  phase_ratio: [0.1, 0.4, 0.5]
+  final_lr_scale: 0.05
+
+model:
+  _name: wav2vec_ctc
+  w2v_path: ???
+  discriminator: false
+  mask_predictor: false
+  apply_mask: true
+  mask_prob: 0.65
+  mask_channel_prob: 0.0
+  mask_channel_length: 64
+  layerdrop: 0.1
+  activation_dropout: 0.1
+  feature_grad_mult: 0
+  freeze_finetune_updates: 0
+  two_proj: true
+
