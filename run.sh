@@ -76,7 +76,7 @@ if [ ${stage} -le 3 ] && [ ${stop_stage} -ge 3 ]; then
             python3 local/split_decode_data.py --datadir ${PWD}/${manifest_dir} --subset ${subset} --num ${decode_nj}
             mkdir -p $pseudo_label_decode_dir/split${decode_nj} || true
             ${decode_cmd} JOB=1:${decode_nj} $pseudo_label_decode_dir/split${decode_nj}/log/decode.JOB.log \
-            python3 ${PWD}/../speech_recognition/infer_dropout_uncertainty.py ${PWD}/${manifest_dir}/split${decode_nj} --task audio_pretraining \
+            python3 ${PWD}/local/decode/infer_ucf.py ${PWD}/${manifest_dir}/split${decode_nj} --task audio_pretraining \
                 --nbest 1 --path ${checkpoint_path} --gen-subset ${subset}_JOB \
                 --results-path ${pseudo_label_decode_dir}/split${decode_nj} --w2l-decoder dropoutkenlm --lexicon ${PWD}/${manifest_dir}/lm/char_lexicon.txt \
                 --lm-model ${PWD}/${manifest_dir}/lm/lm_fglarge.bin --lm-weight 1 --word-score 1 --sil-weight 0 \
